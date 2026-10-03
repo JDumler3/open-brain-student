@@ -124,10 +124,13 @@ a{color:#818cf8}
         <label for="ytUrl" style="margin-top:0">YouTube link</label>
         <div class="row">
           <input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=...">
-          <button class="btn" id="ytLookup">Look up</button>
+          <button class="btn" id="ytCapture">Capture</button>
         </div>
+        <p class="hint" style="margin-top:10px">Paste a link and tap Capture. Your server fetches what was said in the video and saves it. This can take up to 30 seconds.</p>
         <div class="msg" id="ytMsg"></div>
+        <button class="link" id="ytManualToggle">Paste the transcript myself instead</button>
         <div id="ytStep" class="hidden">
+          <button class="btn ghost" id="ytLookup">Look up video</button>
           <div class="yt"><img id="ytThumb" alt=""><div id="ytTitle" style="font-weight:600"></div></div>
           <a class="btn" id="ytLink" target="_blank" rel="noopener" style="display:inline-block;text-decoration:none">Get Transcript ↗</a>
           <ol class="hint">
@@ -162,14 +165,22 @@ a{color:#818cf8}
     <section class="panel" id="panel-url">
       <div class="card">
         <label for="urlInput" style="margin-top:0">Web address</label>
-        <input id="urlInput" type="url" placeholder="https://...">
-        <label for="urlTitle">Title (optional)</label>
-        <input id="urlTitle" type="text" placeholder="What is this article?">
-        <p class="hint" style="margin-top:10px">Browsers block one website from reading another, so for now: open the article, select its text, copy it, and paste it below. Level 3 makes this automatic.</p>
-        <label for="urlText">Article text</label>
-        <textarea id="urlText" placeholder="Paste the article text here"></textarea>
-        <button class="btn" id="urlSave">Save</button>
+        <div class="row">
+          <input id="urlInput" type="url" placeholder="https://...">
+          <button class="btn" id="urlCapture">Capture</button>
+        </div>
+        <p class="hint" style="margin-top:10px">Paste a link and tap Capture. Your server fetches the page, keeps the readable text, and saves it.</p>
         <div class="msg" id="urlMsg"></div>
+        <button class="link" id="urlManualToggle">Paste the article text myself instead</button>
+        <div id="urlManual" class="hidden">
+          <p class="hint" style="margin-top:10px">For pages the server can't read (logins, paywalls, pages built by JavaScript): open the article, copy its text, and paste it below.</p>
+          <label for="urlTitle">Title (optional)</label>
+          <input id="urlTitle" type="text" placeholder="What is this article?">
+          <label for="urlText">Article text</label>
+          <textarea id="urlText" placeholder="Paste the article text here"></textarea>
+          <button class="btn" id="urlSave">Save</button>
+          <div class="msg" id="urlSaveMsg"></div>
+        </div>
       </div>
     </section>
 
@@ -304,6 +315,21 @@ async function capture(btn, msgId, content, metadata, source){
   return true;
 }
 
+// ---------- SERVER CAPTURE (Level 3) ----------
+// Asks one of your Edge Functions to fetch and save a link. supabase-js sends
+// your login token along automatically, so the function knows whose brain it is.
+async function callCapture(fnName, url){
+  const { data, error } = await sb.functions.invoke(fnName, { body: { url } });
+  if(error){
+    // The function's own explanation is inside the error response; dig it out.
+    let detail = error.message;
+    try { const body = await error.context.json(); if(body && body.error) detail = body.error; } catch(e) {}
+    throw new Error(detail);
+  }
+  if(!data || !data.ok) throw new Error((data && data.error) || 'Unknown error');
+  return data;
+}
+
 // ---------- LISTS ----------
 function renderList(id, rows, error, emptyText){
   const el = $(id); el.innerHTML = '';
@@ -391,7 +417,25 @@ $('ytLookup').onclick = async () => {
   $('ytStep').classList.remove('hidden');
   msg('ytMsg', '');
 };
-$('ytUrl').addEventListener('keydown', e => { if(e.key === 'Enter') $('ytLookup').click(); });
+$('ytCapture').onclick = async () => {
+  const link = $('ytUrl').value.trim();
+  if(!ytId(link)) return msg('ytMsg', "That doesn't look like a YouTube link.", 'err');
+  const btn = $('ytCapture');
+  btn.disabled = true; msg('ytMsg', 'Fetching the video on your server… this can take up to 30 seconds.');
+  try {
+    const r = await callCapture('capture-youtube', link);
+    if(r.has_transcript) msg('ytMsg', 'Saved "' + r.title + '" with its full transcript ✓', 'ok');
+    else msg('ytMsg', 'Saved "' + r.title + '", but no transcript was available, so the video DESCRIPTION was saved instead.', 'ok');
+    $('ytUrl').value = '';
+    loadRecent();
+  } catch(e) {
+    msg('ytMsg', 'Could not capture automatically: ' + e.message + ' You can paste the transcript yourself below.', 'err');
+    $('ytStep').classList.remove('hidden');
+  }
+  btn.disabled = false;
+};
+$('ytManualToggle').onclick = () => $('ytStep').classList.toggle('hidden');
+$('ytUrl').addEventListener('keydown', e => { if(e.key === 'Enter') $('ytCapture').click(); });
 $('ytSave').onclick = async () => {
   if(!yt) return msg('ytSaveMsg', 'Look up a video first.', 'err');
   const text = decodeEntities($('ytText').value).trim();
@@ -446,13 +490,31 @@ $('urlSave').onclick = async () => {
   const url = $('urlInput').value.trim();
   const title = decodeEntities($('urlTitle').value).trim();
   const text = decodeEntities($('urlText').value).trim();
-  if(!/^https?:\/\/\S+/i.test(url)) return msg('urlMsg', 'Enter the full web address, starting with https://', 'err');
-  if(!text) return msg('urlMsg', 'Paste the article text first.', 'err');
+  if(!/^https?:\/\/\S+/i.test(url)) return msg('urlSaveMsg', 'Enter the full web address above, starting with https://', 'err');
+  if(!text) return msg('urlSaveMsg', 'Paste the article text first.', 'err');
   const content = '🔗 ' + (title || url) + '\n' + url + '\n\n' + text;
-  if(await capture($('urlSave'), 'urlMsg', content, { url }, { text, kind: 'web' })){
+  if(await capture($('urlSave'), 'urlSaveMsg', content, { url }, { text, kind: 'web' })){
     $('urlInput').value = ''; $('urlTitle').value = ''; $('urlText').value = '';
   }
 };
+$('urlCapture').onclick = async () => {
+  const url = $('urlInput').value.trim();
+  if(!/^https?:\/\/\S+/i.test(url)) return msg('urlMsg', 'Enter the full web address, starting with https://', 'err');
+  const btn = $('urlCapture');
+  btn.disabled = true; msg('urlMsg', 'Fetching the page on your server…');
+  try {
+    const r = await callCapture('capture-url', url);
+    msg('urlMsg', 'Saved "' + r.title + '" from ' + r.hostname + ' ✓', 'ok');
+    $('urlInput').value = '';
+    loadRecent();
+  } catch(e) {
+    msg('urlMsg', 'Could not capture automatically: ' + e.message + ' You can paste the text yourself below.', 'err');
+    $('urlManual').classList.remove('hidden');
+  }
+  btn.disabled = false;
+};
+$('urlManualToggle').onclick = () => $('urlManual').classList.toggle('hidden');
+$('urlInput').addEventListener('keydown', e => { if(e.key === 'Enter') $('urlCapture').click(); });
 
 // ---------- SEARCH ----------
 async function runSearch(){
